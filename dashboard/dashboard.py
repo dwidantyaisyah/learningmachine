@@ -1,135 +1,82 @@
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
-import streamlit as st
 import seaborn as sns
+import streamlit as st
 
-# Load cleaned data
-all_df = pd.read_csv("./dashboard/main_data.csv")
+# Judul Dashboard
+st.title("Proyek Analisis Data: Bike Sharing Dataset")
 
-datetime_columns = ["order_purchase_timestamp", "order_delivered_customer_date"]
-all_df.sort_values(by="order_purchase_timestamp", inplace=True)
-all_df.reset_index(drop=True, inplace=True)
+# Load dataset (replace 'data.csv' with your dataset file)
+uploaded_file = st.file_uploader("Upload Your Dataset", type=["csv", "xlsx"])
+if uploaded_file is not None:
+    # Load data based on file type
+    if uploaded_file.name.endswith('.csv'):
+        data = pd.read_csv(uploaded_file)
+    else:
+        data = pd.read_excel(uploaded_file)
+    
+    # Pastikan kolom tanggal dalam format datetime
+    date_column = st.selectbox("Select Date Column", data.columns)
+    data[date_column] = pd.to_datetime(data[date_column])
 
-for column in datetime_columns:
-    all_df[column] = pd.to_datetime(all_df[column])
+    # Sidebar Filters
+    st.sidebar.header("Filters")
+    
+    # Date Filter
+    date_range = st.sidebar.date_input(
+        "Select Date Range",
+        [data[date_column].min(), data[date_column].max()]
+    )
+    
+    # Category Filter
+    category_column = st.selectbox("Select Category Column", data.select_dtypes(include=['object', 'category']).columns)
+    selected_categories = st.sidebar.multiselect(
+        "Select Categories",
+        options=data[category_column].unique(),
+        default=data[category_column].unique()
+    )
+    
+    # Apply filters
+    filtered_data = data[
+        (data[date_column] >= pd.to_datetime(date_range[0])) &
+        (data[date_column] <= pd.to_datetime(date_range[1])) &
+        (data[category_column].isin(selected_categories))
+    ]
+    
+    st.write(f"Filtered Data ({len(filtered_data)} rows):")
+    st.dataframe(filtered_data)
 
-# Calculate delivery time
-all_df["delivery_time"] = (
-    all_df["order_delivered_customer_date"] - all_df["order_purchase_timestamp"]
-).dt.days
+    # Visualizations
+    st.header("Visualizations")
 
-# Function to create RFM dataframe
-def create_rfm_df(all_df):
-    reference_date = all_df['order_purchase_timestamp'].max()
-    rfm_df = all_df.groupby('customer_unique_id').agg({
-        'order_purchase_timestamp': lambda x: (reference_date - x.max()).days,
-        'order_id': 'nunique',
-        'price': 'sum'
-    }).reset_index()
+    # Line Chart
+    numerical_columns = data.select_dtypes(include=['float64', 'int64']).columns
+    line_chart_column = st.selectbox("Select Column for Line Chart", numerical_columns)
+    plt.figure(figsize=(10, 5))
+    plt.plot(filtered_data[date_column], filtered_data[line_chart_column], label=line_chart_column)
+    plt.xlabel("Date")
+    plt.ylabel(line_chart_column)
+    plt.title(f"{line_chart_column} Over Time")
+    plt.legend()
+    st.pyplot(plt)
 
-    rfm_df.rename(columns={
-        'order_purchase_timestamp': 'Recency',
-        'order_id': 'Frequency',
-        'price': 'Monetary'
-    }, inplace=True)
+    # Bar Chart
+    st.header("Bar Chart of Categories")
+    bar_chart_data = filtered_data.groupby(category_column).size().reset_index(name='counts')
+    plt.figure(figsize=(8, 5))
+    sns.barplot(data=bar_chart_data, x=category_column, y='counts', palette='viridis')
+    plt.title(f"Counts by {category_column}")
+    plt.xlabel(category_column)
+    plt.ylabel("Counts")
+    st.pyplot(plt)
 
-    rfm_df['r_rank'] = rfm_df['Recency'].rank(ascending=False)
-    rfm_df['f_rank'] = rfm_df['Frequency'].rank(ascending=True)
-    rfm_df['m_rank'] = rfm_df['Monetary'].rank(ascending=True)
+    # Correlation Heatmap
+    st.header("Correlation Heatmap")
+    corr = filtered_data.select_dtypes(include=['float64', 'int64']).corr()
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(corr, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5)
+    plt.title("Correlation Matrix")
+    st.pyplot(plt)
 
-    rfm_df['r_rank_norm'] = (rfm_df['r_rank'] / rfm_df['r_rank'].max()) * 100
-    rfm_df['f_rank_norm'] = (rfm_df['f_rank'] / rfm_df['f_rank'].max()) * 100
-    rfm_df['m_rank_norm'] = (rfm_df['m_rank'] / rfm_df['m_rank'].max()) * 100
-
-    rfm_df.drop(columns=['r_rank', 'f_rank', 'm_rank'], inplace=True)
-
-    rfm_df['RFM_score'] = 0.15 * rfm_df['r_rank_norm'] + \
-                          0.28 * rfm_df['f_rank_norm'] + \
-                          0.57 * rfm_df['m_rank_norm']
-
-    rfm_df['RFM_score'] *= 0.05
-    rfm_df = rfm_df.round(2)
-
-    rfm_df["customer_segment"] = np.where(
-        rfm_df['RFM_score'] > 4.5, "Top customers", np.where(
-            rfm_df['RFM_score'] > 4, "High value customer", np.where(
-                rfm_df['RFM_score'] > 3, "Medium value customer", np.where(
-                    rfm_df['RFM_score'] > 1.6, 'Low value customers', 'Lost customers'))))
-
-    customer_segment_df = rfm_df.groupby(by="customer_segment", as_index=False).customer_unique_id.nunique()
-    return rfm_df, customer_segment_df
-
-# Sidebar filters
-with st.sidebar:
-    st.title("Filters")
-    try:
-        min_date = all_df["order_purchase_timestamp"].min()
-        max_date = all_df["order_purchase_timestamp"].max()
-
-        start_date, end_date = st.date_input(
-            "Rentang Waktu",
-            [min_date, max_date],
-            min_value=min_date,
-            max_value=max_date
-        )
-    except ValueError:
-        st.error("Masukkan tanggal mulai dan akhir yang valid.")
-        start_date, end_date = min_date, max_date
-
-main_df = all_df[
-    (all_df["order_purchase_timestamp"] >= pd.Timestamp(start_date)) &
-    (all_df["order_purchase_timestamp"] <= pd.Timestamp(end_date))
-]
-
-# Visualizations
-def display_visualisasi_pertama(df):
-    st.header("Distribusi Frekuensi Pesanan Berdasarkan Status")
-    status_counts = df["order_status"].value_counts()
-    fig, ax = plt.subplots()
-    ax.bar(status_counts.index, status_counts.values, color="skyblue")
-    ax.set_title("Distribusi Frekuensi Pesanan")
-    ax.set_xlabel("Status Pesanan")
-    ax.set_ylabel("Frekuensi")
-    st.pyplot(fig)
-
-def display_visualisasi_kedua(df):
-    st.header("Distribusi Waktu Pengiriman")
-    delivery_time = df["delivery_time"]
-    fig, ax = plt.subplots()
-    ax.hist(delivery_time, bins=20, color="skyblue", edgecolor="black")
-    ax.set_title("Distribusi Waktu Pengiriman")
-    ax.set_xlabel("Waktu (hari)")
-    ax.set_ylabel("Frekuensi")
-    st.pyplot(fig)
-
-def display_rfm(rfm_df):
-    st.header("RFM Analysis")
-    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-
-    sns.barplot(data=rfm_df.sort_values(by="Recency").head(5), x="customer_unique_id", y="Recency", ax=ax[0])
-    ax[0].set_title("Recency")
-
-    sns.barplot(data=rfm_df.sort_values(by="Frequency", ascending=False).head(5), x="customer_unique_id", y="Frequency", ax=ax[1])
-    ax[1].set_title("Frequency")
-
-    sns.barplot(data=rfm_df.sort_values(by="Monetary", ascending=False).head(5), x="customer_unique_id", y="Monetary", ax=ax[2])
-    ax[2].set_title("Monetary")
-
-    st.pyplot(fig)
-
-def display_customer_segment(customer_segment_df):
-    st.header("Customer Segments")
-    fig = plt.figure(figsize=(10, 5))
-    sns.barplot(data=customer_segment_df, x="customer_segment", y="customer_unique_id", palette="viridis")
-    plt.title("Number of Customers by Segment")
-    st.pyplot(fig)
-
-# Generate RFM analysis
-rfm_df, customer_segment_df = create_rfm_df(main_df)
-
-st.title("E-Commerce Data Analysis Dashboard")
-display_visualisasi_pertama(main_df)
-display_visualisasi_kedua(main_df)
-display_rfm(rfm_df)
-display_customer_segment(customer_segment_df)
+else:
+    st.info("Please upload a dataset to begin.")
